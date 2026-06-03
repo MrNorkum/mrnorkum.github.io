@@ -227,7 +227,7 @@ function App() {
         userName={userName}
         roomId={roomId}
         peerId={peerId}
-        isConnected={isConnected}
+        isConnected={dataConnected}
         connectionStatus={connectionStatus}
         onSetUserName={handleSetUserName}
         onCreateRoom={handleCreateRoom}
@@ -240,7 +240,7 @@ function App() {
         messages={messages}
         userName={userName}
         remoteName={remoteName}
-        isConnected={isConnected && connectionRef.current?.open}
+        isConnected={dataConnected}
         onSendMessage={handleSendMessage}
         onSendFile={handleSendFile}
         onStartAudioCall={() => startAudioCall(connectionRef.current, peer, roomId, userName)}

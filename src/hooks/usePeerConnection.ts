@@ -51,16 +51,27 @@ export const usePeerConnection = (
     newPeer.on('connection', (conn: any) => {
       console.log('✅ Bağlantı isteği geldi:', conn.peer);
 
-      conn.on('open', () => {
-        console.log('✅ Gelen bağlantı başarıyla açıldı:', conn.peer);
+      const openConnection = () => {
+        console.log('✅ Gelen bağlantı kabul edildi:', conn.peer);
         onConnectionOpenRef.current(conn);
-      });
+      };
+
+      if (conn.open) {
+        openConnection();
+      } else {
+        conn.on('open', openConnection);
+
+        setTimeout(() => {
+          if (conn.open) {
+            openConnection();
+          }
+        }, 500);
+      }
 
       conn.on('error', (err: any) => {
         console.error('❌ Gelen bağlantı hatası:', err);
       });
     });
-
     newPeer.on('error', (err: any) => {
       console.error('❌ PeerJS hatası:', err);
       setError(err.message);
