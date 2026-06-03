@@ -35,7 +35,6 @@ function App() {
   // Memoize connection open handler
   const handleConnectionOpen = useCallback((conn: any) => {
     connectionRef.current = conn;
-    setRoomId(conn.peer);
     
     loadMessages(conn.peer);
 
@@ -163,10 +162,7 @@ function App() {
 
   const handleJoinRoom = async (roomId: string) => {
     try {
-      const conn = await joinRoom(roomId);
-      if (conn) {
-        handleConnectionOpen(conn);
-      }
+      await joinRoom(roomId);
     } catch (e: any) {
       console.error('Join error:', e);
       alert('Oda katılma hatası: ' + e.message);
