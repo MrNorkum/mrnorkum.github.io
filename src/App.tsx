@@ -155,11 +155,7 @@ function App() {
   };
 
   const handleCreateRoom = () => {
-    if (peerId) {
       createRoom();
-      setRoomId(peerId);
-      navigator.clipboard.writeText(window.location.href.split('?')[0] + `?room=${peerId}`);
-    }
   };
 
   const handleJoinRoom = async (roomId: string) => {

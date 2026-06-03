@@ -83,6 +83,7 @@ export const usePeerConnection = (
 
     peerRef.current = p;
     setPeer(p);
+    setPeerId(id);
 
     p.on('open', (openedId: string) => {
       console.log('✅ Oda oluşturuldu, ID:', openedId);
@@ -91,6 +92,8 @@ export const usePeerConnection = (
     });
 
     attachIncoming(p);
+
+    return id;
   }, [onConnectionOpen]);
 
   const joinRoom = useCallback((roomId: string) => {
