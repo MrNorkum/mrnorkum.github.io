@@ -1274,14 +1274,18 @@
         // ============================================
         const NotificationManager = {
             init() {
-                if ('Notification' in window) {
-                    if (Notification.permission === 'default') {
-                        Notification.requestPermission();
-                    }
+                // Don't request permission here - do it on first user interaction
+            },
+
+            requestPermission() {
+                if ('Notification' in window && Notification.permission === 'default') {
+                    Notification.requestPermission();
                 }
             },
 
             show(title, options = {}) {
+                if (!('Notification' in window)) return;
+                this.requestPermission();
                 if (Notification.permission === 'granted') {
                     new Notification(title, {
                         icon: '🫐',
@@ -2127,15 +2131,20 @@
         const PeerManager = {
             async init() {
                 return new Promise((resolve) => {
+                    // Use default PeerJS cloud with Google STUN servers for better NAT traversal
                     AppState.peer = new Peer({
-                        host: 'peerjs-server.herokuapp.com',
-                        secure: true,
-                        path: '/peerjs',
-                        port: 443
+                        config: {
+                            iceServers: [
+                                { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+                                { urls: ['stun:stun2.l.google.com:19302', 'stun:stun3.l.google.com:19302'] },
+                                { urls: ['stun:stun4.l.google.com:19302'] }
+                            ]
+                        }
                     });
 
                     AppState.peer.on('open', (id) => {
-                        console.log('Peer ID:', id);
+                        console.log('✅ PeerJS bağlantısı kuruldu, ID:', id);
+                        UIManager.showToast('✅ P2P bağlantı hazır', 'success');
                         resolve();
                     });
 
@@ -2148,9 +2157,17 @@
                     });
 
                     AppState.peer.on('error', (err) => {
-                        console.error('Peer error:', err);
-                        UIManager.showToast(`❌ Peer hatası: ${err.message}`, 'error');
+                        console.error('❌ Peer hatası:', err);
+                        UIManager.showToast(`❌ Bağlantı hatası: ${err.message}`, 'error');
                     });
+
+                    // Timeout fallback
+                    setTimeout(() => {
+                        if (!AppState.peer.open) {
+                            console.warn('PeerJS bağlantı zaman aşımı');
+                            resolve();
+                        }
+                    }, 15000);
                 });
             },
 
@@ -2241,6 +2258,11 @@
         // EVENT LISTENERS
         // ============================================
         function setupEventListeners() {
+            // Request notification permission on first user interaction
+            document.addEventListener('click', () => {
+                NotificationManager.requestPermission();
+            }, { once: true });
+
             // User name
             document.getElementById('setUserNameBtn').addEventListener('click', () => {
                 const name = document.getElementById('userNameInput').value.trim();
