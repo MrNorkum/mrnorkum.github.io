@@ -1088,6 +1088,7 @@
         // ============================================
         const AppState = {
             peer: null,
+            peerId: null,
             connection: null,
             localStream: null,
             remoteStream: null,
@@ -2131,19 +2132,19 @@
         const PeerManager = {
             async init() {
                 return new Promise((resolve) => {
-                    // Use default PeerJS cloud with Google STUN servers for better NAT traversal
+                    // Use default PeerJS cloud with minimal STUN servers for fast discovery
                     AppState.peer = new Peer({
                         config: {
                             iceServers: [
-                                { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-                                { urls: ['stun:stun2.l.google.com:19302', 'stun:stun3.l.google.com:19302'] },
-                                { urls: ['stun:stun4.l.google.com:19302'] }
+                                { urls: ['stun:stun.l.google.com:19302'] },
+                                { urls: ['stun:stun1.l.google.com:19302'] }
                             ]
                         }
                     });
 
                     AppState.peer.on('open', (id) => {
                         console.log('✅ PeerJS bağlantısı kuruldu, ID:', id);
+                        AppState.peerId = id;
                         UIManager.showToast('✅ P2P bağlantı hazır', 'success');
                         resolve();
                     });
@@ -2158,7 +2159,9 @@
 
                     AppState.peer.on('error', (err) => {
                         console.error('❌ Peer hatası:', err);
-                        UIManager.showToast(`❌ Bağlantı hatası: ${err.message}`, 'error');
+                        if (err.type !== 'peer-unavailable') {
+                            UIManager.showToast(`❌ Bağlantı hatası: ${err.message}`, 'error');
+                        }
                     });
 
                     // Timeout fallback
@@ -2167,21 +2170,17 @@
                             console.warn('PeerJS bağlantı zaman aşımı');
                             resolve();
                         }
-                    }, 15000);
+                    }, 10000);
                 });
             },
 
             createRoom() {
-                AppState.roomId = generateRoomId();
+                // Use our own Peer ID as the room ID
+                AppState.roomId = AppState.peerId;
                 UIManager.displayRoomId(AppState.roomId);
                 UIManager.updateChatHeader();
                 UIManager.clearMessages();
                 UIManager.updateConnectionStatus('connecting');
-
-                // Listen for connections to this room
-                AppState.peer.on('connection', (conn) => {
-                    this.handleConnection(conn);
-                });
 
                 UIManager.showToast(`✅ Oda oluşturuldu: ${AppState.roomId}`, 'success');
             },
@@ -2192,8 +2191,21 @@
                 UIManager.clearMessages();
                 UIManager.updateConnectionStatus('connecting');
 
-                const conn = AppState.peer.connect(roomId);
-                this.handleConnection(conn);
+                const conn = AppState.peer.connect(roomId, {
+                    reliable: true,
+                    metadata: { userName: AppState.userName }
+                });
+                
+                conn.on('open', () => {
+                    console.log('✅ Bağlantı başarıyla açıldı:', roomId);
+                    this.handleConnection(conn);
+                });
+
+                conn.on('error', (err) => {
+                    console.error('❌ Bağlantı hatası:', err);
+                    UIManager.showToast(`❌ ${roomId} odasına bağlanılamadı: ${err.message}`, 'error');
+                    UIManager.updateConnectionStatus('disconnected');
+                });
 
                 UIManager.showToast(`⏳ ${roomId} odasına bağlanılıyor...`, 'info');
             },
