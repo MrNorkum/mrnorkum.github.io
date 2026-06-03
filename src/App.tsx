@@ -17,7 +17,6 @@ function App() {
   const [dataConnected, setDataConnected] = useState(false);
 
   const connectionRef = useRef<any>(null);
-  const autoJoinedRef = useRef(false);
 
   const {
     messages,
@@ -131,16 +130,19 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (autoJoinedRef.current) return;
-
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
 
-    if (roomParam) {
-      autoJoinedRef.current = true;
-      setRoomId(roomParam);
-      handleJoinRoom(roomParam);
-    }
+    if (!roomParam) return;
+
+    const key = `peer-chat-auto-joined:${roomParam}`;
+
+    if (sessionStorage.getItem(key) === '1') return;
+
+    sessionStorage.setItem(key, '1');
+    setRoomId(roomParam);
+    handleJoinRoom(roomParam);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -160,6 +162,8 @@ function App() {
   };
 
   const handleCreateRoom = () => {
+    sessionStorage.clear();
+
     const id = createRoom();
 
     setRoomId(id);
