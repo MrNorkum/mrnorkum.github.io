@@ -76,7 +76,6 @@ function App() {
 
     conn.on('close', () => {
       connectionRef.current = null;
-      setRoomId('');
     });
 
     if (conn.metadata?.userName) {
