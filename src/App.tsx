@@ -1,284 +1,522 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Sidebar } from './components/Sidebar';
-import { ChatArea } from './components/ChatArea';
-import { usePeerConnection } from './hooks/usePeerConnection';
-import { useMessageHandling } from './hooks/useMessageHandling';
-import { useCallManager } from './hooks/useCallManager';
-import { StorageManager } from './utils/storage';
-import { NotificationManager } from './utils/notifications';
-import { FileTransferManager } from './utils/fileTransfer';
+import { ChangeEvent, KeyboardEvent, useMemo, useRef, useState } from 'react';
+import Peer, { DataConnection } from 'peerjs';
 import './App.css';
 
-function App() {
-  const [userName, setUserName] = useState('Kullanıcı');
-  const [remoteName, setRemoteName] = useState('');
-  const [roomId, setRoomId] = useState('');
-  const [connectionStatus, setConnectionStatus] = useState('🔴 Bağlanıyor');
-  const [dataConnected, setDataConnected] = useState(false);
-
-  const connectionRef = useRef<any>(null);
-
-  const {
-    messages,
-    addMessage,
-    loadMessages,
-    unreadCount
-  } = useMessageHandling();
-
-  const {
-    startAudioCall,
-    startVideoCall,
-    startScreenShare
-  } = useCallManager();
-
-  const handleConnectionOpen = useCallback((conn: any) => {
-    connectionRef.current = conn;
-    setDataConnected(true);
-
-    const activeRoomId = roomId || conn.peer;
-    loadMessages(activeRoomId).catch(console.error);
-
-    conn.on('data', (data: any) => {
-      try {
-        const message = typeof data === 'string' ? JSON.parse(data) : data;
-
-        if (message.type === 'text') {
-          const receivedMessage = {
-            ...message,
-            status: 'received' as const,
-            sender: message.sender || remoteName || 'Remote'
-          };
-
-          addMessage(receivedMessage);
-          StorageManager.saveMessage(receivedMessage).catch(console.error);
-          NotificationManager.playSound('message');
-          NotificationManager.show(`${receivedMessage.sender}: ${String(receivedMessage.payload).slice(0, 50)}`);
-          NotificationManager.updateBadge(unreadCount + 1);
-
-        } else if (message.type === 'file-start') {
-          FileTransferManager.handleFileStart(message);
-
-        } else if (message.type === 'file-chunk') {
-          FileTransferManager.handleFileChunk(message);
-
-        } else if (message.type === 'file-end') {
-          const fileMsg = FileTransferManager.handleFileEnd(message);
-
-          if (fileMsg) {
-            fileMsg.sender = remoteName || 'Remote';
-            addMessage(fileMsg);
-            StorageManager.saveMessage(fileMsg).catch(console.error);
-            NotificationManager.playSound('message');
-          }
-        }
-      } catch (e) {
-        console.error('Error parsing message:', e);
-      }
-    });
-
-    conn.on('close', () => {
-      if (connectionRef.current === conn) {
-        connectionRef.current = null;
-      }
-
-      setDataConnected(false);
-      setRemoteName('');
-    });
-
-    const name = conn.metadata?.userName || 'Remote';
-    setRemoteName(name);
-
-    addMessage({
-      id: Math.random().toString(36),
-      type: 'system' as const,
-      sender: 'System',
-      time: new Date().toISOString(),
-      payload: `${name} bağlandı`,
-      status: 'received' as const
-    });
-  }, [addMessage, loadMessages, remoteName, roomId, unreadCount]);
-
-  const {
-    peer,
-    peerId,
-    isConnected,
-    createRoom,
-    joinRoom
-  } = usePeerConnection(handleConnectionOpen);
-
-  useEffect(() => {
-    StorageManager.init().catch(console.error);
-
-    const handleFirstInteraction = async () => {
-      await NotificationManager.requestPermission();
-      document.removeEventListener('click', handleFirstInteraction);
+type ChatPayload =
+  | { kind: 'text'; text: string }
+  | {
+      kind: 'file';
+      name: string;
+      size: number;
+      mime: string;
+      data: string;
+      caption?: string;
     };
 
-    document.addEventListener('click', handleFirstInteraction);
+type ChatMessage = {
+  id: string;
+  payload: ChatPayload;
+  sender: 'me' | 'other' | 'system';
+  time: string;
+};
 
-    return () => {
-      document.removeEventListener('click', handleFirstInteraction);
-    };
-  }, []);
+type ConnectionState = 'idle' | 'waiting' | 'connecting' | 'connected' | 'error';
 
-  useEffect(() => {
-    const savedUserName = localStorage.getItem('peer-chat-username');
+const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
-    if (savedUserName) {
-      setUserName(savedUserName);
-    }
-  }, []);
+function randomId(length = 8) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  return Array.from({ length }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+}
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const roomParam = params.get('room');
+function messageId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
-    if (!roomParam) return;
+function now() {
+  return new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+}
 
-    const key = `peer-chat-auto-joined:${roomParam}`;
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
-    if (sessionStorage.getItem(key) === '1') return;
+function fileIcon(mime: string, name: string) {
+  if (mime.startsWith('image/')) return '🖼️';
+  if (mime.startsWith('video/')) return '🎥';
+  if (mime.startsWith('audio/')) return '🎵';
+  if (mime.includes('pdf')) return '📄';
+  if (/\.(zip|rar|7z)$/i.test(name)) return '📦';
+  if (/\.(doc|docx)$/i.test(name)) return '📝';
+  if (/\.(xls|xlsx)$/i.test(name)) return '📊';
+  return '📎';
+}
 
-    sessionStorage.setItem(key, '1');
-    setRoomId(roomParam);
-    handleJoinRoom(roomParam);
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('Dosya okunamadı.'));
+    reader.readAsDataURL(file);
+  });
+}
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (dataConnected) {
-      setConnectionStatus('✅ Bağlı');
-    } else if (roomId || peerId) {
-      setConnectionStatus('🟡 Hazır, bağlantı bekliyor');
-    } else {
-      setConnectionStatus('🔴 Bağlanıyor');
-    }
-  }, [dataConnected, peerId, roomId]);
-
-  const handleSetUserName = (name: string) => {
-    setUserName(name);
-    localStorage.setItem('peer-chat-username', name);
-  };
-
-  const handleCreateRoom = () => {
-    sessionStorage.clear();
-
-    const id = createRoom();
-
-    setRoomId(id);
-    setRemoteName('');
-    setDataConnected(false);
-
-    const url = `${window.location.origin}${window.location.pathname}?room=${id}`;
-    navigator.clipboard.writeText(url).catch(console.error);
-
-    window.history.replaceState(null, '', `?room=${id}`);
-  };
-
-  const handleJoinRoom = async (targetRoomId: string) => {
-    const cleanRoomId = targetRoomId.trim();
-
-    if (!cleanRoomId) return;
-
-    try {
-      setRoomId(cleanRoomId);
-      setRemoteName('');
-      setDataConnected(false);
-
-      await joinRoom(cleanRoomId);
-    } catch (e: any) {
-      console.error('Join error:', e);
-      alert('Oda katılma hatası: ' + (e?.message || String(e)));
-    }
-  };
-
-  const handleCopyRoom = () => {
-    const id = roomId || peerId;
-
-    if (!id) {
-      alert('Henüz oda yok');
-      return;
-    }
-
-    const url = `${window.location.origin}${window.location.pathname}?room=${id}`;
-    navigator.clipboard.writeText(url).catch(console.error);
-    alert('Link kopyalandı!');
-  };
-
-  const handleSendMessage = (text: string) => {
-    if (!connectionRef.current || !connectionRef.current.open) {
-      alert('Bağlantı hazır değil');
-      return;
-    }
-
-    const message = {
-      id: Math.random().toString(36),
-      type: 'text' as const,
-      sender: userName,
-      time: new Date().toISOString(),
-      payload: text,
-      status: 'sent' as const
-    };
-
-    connectionRef.current.send(JSON.stringify(message));
-    addMessage(message);
-    StorageManager.saveMessage(message).catch(console.error);
-  };
-
-  const handleSendFile = async (file: File) => {
-    if (!connectionRef.current || !connectionRef.current.open) {
-      alert('Bağlantı hazır değil');
-      return;
-    }
-
-    const validation = FileTransferManager.canSendFile(file);
-
-    if (!validation.ok) {
-      alert(validation.error);
-      return;
-    }
-
-    const transfer = FileTransferManager.generateFileTransfer(file);
-
-    for await (const chunk of FileTransferManager.readFileChunks(file, transfer.fileId)) {
-      connectionRef.current.send(JSON.stringify(chunk));
-    }
-  };
-
-  const handleCopyLink = () => {
-    handleCopyRoom();
-  };
-
+function StatusPill({ state, text }: { state: ConnectionState; text: string }) {
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '350px 1fr', height: '100vh' }}>
-      <Sidebar
-        userName={userName}
-        roomId={roomId}
-        peerId={roomId || peerId}
-        isConnected={dataConnected}
-        connectionStatus={connectionStatus}
-        onSetUserName={handleSetUserName}
-        onCreateRoom={handleCreateRoom}
-        onJoinRoom={handleJoinRoom}
-        onCopyRoom={handleCopyRoom}
-        onClearHistory={() => StorageManager.clearHistory()}
-      />
-
-      <ChatArea
-        messages={messages}
-        userName={userName}
-        remoteName={remoteName}
-        isConnected={dataConnected}
-        onSendMessage={handleSendMessage}
-        onSendFile={handleSendFile}
-        onStartAudioCall={() => startAudioCall(connectionRef.current, peer, roomId, userName)}
-        onStartVideoCall={() => startVideoCall(connectionRef.current, peer, roomId, userName)}
-        onStartScreenShare={() => startScreenShare(connectionRef.current, peer, roomId, userName)}
-        onCopyLink={handleCopyLink}
-      />
+    <div className={`status ${state}`}>
+      <span className="status-dot" />
+      <span>{text}</span>
     </div>
   );
 }
 
-export default App;
+function Sidebar({
+  roomId,
+  setRoomId,
+  activeRoom,
+  statusText,
+  connectionState,
+  onCreateRoom,
+  onJoinRoom,
+  onClearMessages,
+}: {
+  roomId: string;
+  setRoomId: (value: string) => void;
+  activeRoom: string;
+  statusText: string;
+  connectionState: ConnectionState;
+  onCreateRoom: () => void;
+  onJoinRoom: () => void;
+  onClearMessages: () => void;
+}) {
+  async function copyRoom() {
+    if (!activeRoom) return;
+    await navigator.clipboard?.writeText(activeRoom);
+  }
+
+  return (
+    <aside className="sidebar">
+      <div className="sidebar-header">
+        <div className="brand">
+          <div className="brand-logo">P2P</div>
+          <div>
+            <h1>Peer Chat</h1>
+            <p>Tarayıcı bazlı gizli sohbet</p>
+          </div>
+        </div>
+      </div>
+
+      <section className="room-section">
+        <h3>Oda Yönetimi</h3>
+        <div className="room-controls">
+          <input
+            className="room-input"
+            value={roomId}
+            onChange={(event) => setRoomId(event.target.value.toUpperCase())}
+            placeholder="Oda ID'sini girin..."
+            maxLength={20}
+          />
+          <button className="btn btn-primary btn-small" onClick={onJoinRoom}>
+            Katıl
+          </button>
+        </div>
+        <button className="btn btn-secondary full" onClick={onCreateRoom}>
+          🆕 Yeni Oda Oluştur
+        </button>
+
+        {activeRoom && (
+          <div className="room-card">
+            <div className="room-label">Aktif Oda</div>
+            <div className="room-value">{activeRoom}</div>
+            <button className="btn btn-ghost full" onClick={copyRoom}>
+              📋 Oda ID Kopyala
+            </button>
+          </div>
+        )}
+
+        <StatusPill state={connectionState} text={statusText} />
+      </section>
+
+      <div className="sidebar-content">
+        <InfoCard title="ℹ️ Bilgi">Bu uygulama PeerJS / WebRTC veri kanalı ile P2P çalışır.</InfoCard>
+        <InfoCard title="🔒 Gizlilik">Mesaj ve dosyalar doğrudan karşı tarafa gider; chat sunucuda saklanmaz.</InfoCard>
+        <InfoCard title="⚠️ Uyarı">İki taraf aynı anda çevrimiçi olmalıdır. Offline mesaj desteği yoktur.</InfoCard>
+      </div>
+
+      <div className="sidebar-footer">
+        <button className="btn btn-danger full" onClick={onClearMessages}>
+          🗑️ Sohbeti Temizle
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function InfoCard({ title, children }: { title: string; children: string }) {
+  return (
+    <div className="info-card">
+      <strong>{title}</strong>
+      <p>{children}</p>
+    </div>
+  );
+}
+
+function ChatHeader({ activeRoom, connected }: { activeRoom: string; connected: boolean }) {
+  return (
+    <header className="chat-header">
+      <div className="chat-title-wrap">
+        <div className="chat-avatar">💬</div>
+        <div>
+          <h2>{activeRoom ? `Oda: ${activeRoom}` : 'Peer Chat'}</h2>
+          <p>{connected ? '✅ P2P bağlantı açık' : 'Oda oluştur veya mevcut odaya katıl'}</p>
+        </div>
+      </div>
+      <div className="header-actions">
+        <button className="circle-btn" disabled title="Sesli arama UI">
+          🎤
+        </button>
+        <button className="circle-btn" disabled title="Görüntülü arama UI">
+          📹
+        </button>
+        <button className="circle-btn purple" disabled title="Ekran paylaşımı UI">
+          🖥️
+        </button>
+      </div>
+    </header>
+  );
+}
+
+function MessageList({ messages }: { messages: ChatMessage[] }) {
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  setTimeout(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
+
+  if (messages.length === 0) {
+    return (
+      <main className="messages">
+        <div className="empty-state">
+          <div className="empty-icon">💬</div>
+          <h3>Henüz mesaj yok</h3>
+          <p>Yeni oda oluştur veya var olan odaya katıl. Mesaj, fotoğraf, video, ses veya doküman gönderebilirsin.</p>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="messages">
+      {messages.map((message) => (
+        <MessageBubble key={message.id} message={message} />
+      ))}
+      <div ref={endRef} />
+    </main>
+  );
+}
+
+function MessageBubble({ message }: { message: ChatMessage }) {
+  if (message.sender === 'system') {
+    return <div className="system-message">{message.payload.kind === 'text' ? message.payload.text : 'Sistem mesajı'}</div>;
+  }
+
+  const mine = message.sender === 'me';
+
+  return (
+    <div className={`message-group ${mine ? 'sent' : 'received'}`}>
+      {!mine && <div className="avatar small">P</div>}
+      <div className="bubble-stack">
+        <div className={`message ${mine ? 'sent' : 'received'}`}>
+          <PayloadView payload={message.payload} />
+        </div>
+        <div className="message-time">{message.time}</div>
+      </div>
+      {mine && <div className="avatar small">B</div>}
+    </div>
+  );
+}
+
+function PayloadView({ payload }: { payload: ChatPayload }) {
+  if (payload.kind === 'text') return <span>{payload.text}</span>;
+
+  return (
+    <div className="media-content">
+      {payload.mime.startsWith('image/') && <img src={payload.data} alt={payload.name} className="media-image" />}
+      {payload.mime.startsWith('video/') && <video src={payload.data} controls className="media-video" />}
+      {payload.mime.startsWith('audio/') && <audio src={payload.data} controls className="media-audio" />}
+
+      <div className="file-card">
+        <div className="file-icon">{fileIcon(payload.mime, payload.name)}</div>
+        <div className="file-info">
+          <div className="file-name">{payload.name}</div>
+          <div className="file-size">{formatBytes(payload.size)} • {payload.mime || 'dosya'}</div>
+        </div>
+        <a className="download-btn" href={payload.data} download={payload.name}>
+          İndir
+        </a>
+      </div>
+
+      {payload.caption && <div className="caption">{payload.caption}</div>}
+    </div>
+  );
+}
+
+function Composer({
+  message,
+  setMessage,
+  selectedFile,
+  onFileSelect,
+  onClearFile,
+  onSend,
+  disabled,
+}: {
+  message: string;
+  setMessage: (value: string) => void;
+  selectedFile: File | null;
+  onFileSelect: (file: File | null) => void;
+  onClearFile: () => void;
+  onSend: () => void;
+  disabled: boolean;
+}) {
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    onFileSelect(event.target.files?.[0] ?? null);
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'Enter') onSend();
+  }
+
+  return (
+    <footer className="input-area">
+      {selectedFile && (
+        <div className="preview-bar">
+          <span>📎 {selectedFile.name} • {formatBytes(selectedFile.size)}</span>
+          <button onClick={onClearFile} aria-label="Dosyayı kaldır">×</button>
+        </div>
+      )}
+
+      <div className="composer-row">
+        <label className="file-input-label" title="Dosya ekle">
+          📎
+          <input
+            type="file"
+            onChange={handleFileChange}
+            accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar"
+          />
+        </label>
+        <input
+          className="message-input"
+          value={message}
+          onChange={(event) => setMessage(event.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={disabled ? 'Önce odaya bağlan...' : 'Mesajınızı yazın...'}
+          disabled={disabled}
+        />
+        <button className="btn btn-primary send-btn" onClick={onSend} disabled={disabled}>
+          📤
+        </button>
+      </div>
+    </footer>
+  );
+}
+
+export default function App() {
+  const peerRef = useRef<Peer | null>(null);
+  const connectionRef = useRef<DataConnection | null>(null);
+
+  const [roomId, setRoomId] = useState('');
+  const [activeRoom, setActiveRoom] = useState('');
+  const [connectionState, setConnectionState] = useState<ConnectionState>('idle');
+  const [statusText, setStatusText] = useState('Bağlantı bekleniyor...');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [message, setMessage] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const connected = useMemo(() => connectionState === 'connected', [connectionState]);
+
+  function addMessage(payload: ChatPayload, sender: ChatMessage['sender']) {
+    setMessages((current) => [...current, { id: messageId(), payload, sender, time: now() }]);
+  }
+
+  function addSystem(text: string) {
+    addMessage({ kind: 'text', text }, 'system');
+  }
+
+  function resetPeer() {
+    connectionRef.current?.close();
+    peerRef.current?.destroy();
+    connectionRef.current = null;
+    peerRef.current = null;
+  }
+
+  function setupConnection(connection: DataConnection, successText: string) {
+    connectionRef.current = connection;
+
+    connection.on('open', () => {
+      setConnectionState('connected');
+      setStatusText(successText);
+      addSystem('Bağlantı kuruldu.');
+    });
+
+    connection.on('data', (data) => {
+      const payload = typeof data === 'string' ? ({ kind: 'text', text: data } as ChatPayload) : (data as ChatPayload);
+      addMessage(payload, 'other');
+    });
+
+    connection.on('close', () => {
+      setConnectionState('error');
+      setStatusText('Bağlantı kapandı.');
+      addSystem('Bağlantı kapandı.');
+    });
+
+    connection.on('error', () => {
+      setConnectionState('error');
+      setStatusText('Bağlantıda hata oluştu.');
+    });
+  }
+
+  function createRoom() {
+    resetPeer();
+    const id = randomId();
+    const peer = new Peer(id);
+    peerRef.current = peer;
+    setActiveRoom(id);
+    setRoomId(id);
+    setConnectionState('waiting');
+    setStatusText('Oda oluşturuluyor...');
+
+    peer.on('open', () => {
+      setStatusText(`Oda oluşturuldu: ${id}. Karşı tarafa bu ID'yi gönder.`);
+    });
+
+    peer.on('connection', (connection) => setupConnection(connection, 'Bir kullanıcı bağlandı.'));
+
+    peer.on('error', (error) => {
+      setConnectionState('error');
+      setStatusText(`PeerJS hatası: ${error.type}`);
+    });
+  }
+
+  function joinRoom() {
+    const targetRoom = roomId.trim();
+    if (!targetRoom) {
+      setConnectionState('error');
+      setStatusText('Lütfen Oda ID gir.');
+      return;
+    }
+
+    resetPeer();
+    const peer = new Peer();
+    peerRef.current = peer;
+    setActiveRoom(targetRoom);
+    setConnectionState('connecting');
+    setStatusText('Odaya bağlanılıyor...');
+
+    peer.on('open', () => {
+      const connection = peer.connect(targetRoom, { reliable: true });
+      setupConnection(connection, 'Odaya bağlanıldı.');
+    });
+
+    peer.on('error', (error) => {
+      setConnectionState('error');
+      setStatusText(`PeerJS hatası: ${error.type}`);
+    });
+  }
+
+  function selectFile(file: File | null) {
+    if (!file) return;
+    if (file.size > MAX_FILE_SIZE) {
+      setConnectionState('error');
+      setStatusText('Dosya çok büyük. Şimdilik üst limit 25 MB.');
+      return;
+    }
+    setSelectedFile(file);
+  }
+
+  async function sendCurrent() {
+    const connection = connectionRef.current;
+    if (!connection || !connection.open) {
+      setConnectionState('error');
+      setStatusText('Önce bir odaya bağlanmalısın.');
+      return;
+    }
+
+    const text = message.trim();
+    if (!selectedFile && !text) return;
+
+    try {
+      if (selectedFile) {
+        const payload: ChatPayload = {
+          kind: 'file',
+          name: selectedFile.name,
+          size: selectedFile.size,
+          mime: selectedFile.type || 'application/octet-stream',
+          data: await readFileAsDataUrl(selectedFile),
+          caption: text,
+        };
+        connection.send(payload);
+        addMessage(payload, 'me');
+        setSelectedFile(null);
+        setMessage('');
+        setStatusText(`Dosya gönderildi: ${selectedFile.name}`);
+        setConnectionState('connected');
+        return;
+      }
+
+      const payload: ChatPayload = { kind: 'text', text };
+      connection.send(payload);
+      addMessage(payload, 'me');
+      setMessage('');
+    } catch {
+      setConnectionState('error');
+      setStatusText('Gönderim sırasında hata oluştu.');
+    }
+  }
+
+  function handleDrop(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDragging(false);
+    selectFile(event.dataTransfer.files?.[0] ?? null);
+  }
+
+  return (
+    <div
+      className={`app-shell ${dragging ? 'dragging' : ''}`}
+      onDragEnter={(event) => {
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragOver={(event) => event.preventDefault()}
+      onDragLeave={() => setDragging(false)}
+      onDrop={handleDrop}
+    >
+      <Sidebar
+        roomId={roomId}
+        setRoomId={setRoomId}
+        activeRoom={activeRoom}
+        statusText={statusText}
+        connectionState={connectionState}
+        onCreateRoom={createRoom}
+        onJoinRoom={joinRoom}
+        onClearMessages={() => setMessages([])}
+      />
+
+      <section className="main">
+        <ChatHeader activeRoom={activeRoom} connected={connected} />
+        <MessageList messages={messages} />
+        <Composer
+          message={message}
+          setMessage={setMessage}
+          selectedFile={selectedFile}
+          onFileSelect={selectFile}
+          onClearFile={() => setSelectedFile(null)}
+          onSend={sendCurrent}
+          disabled={!connected}
+        />
+      </section>
+
+      {dragging && <div className="drop-zone">📁 Dosyayı bırak</div>}
+    </div>
+  );
+}
