@@ -178,7 +178,7 @@ function App() {
   };
 
   const handleSendMessage = (text: string) => {
-    if (!connectionRef.current?.open) {
+    if (!connectionRef.current) {
       alert('Bağlantı hazır değil');
       return;
     }
@@ -198,7 +198,7 @@ function App() {
   };
 
   const handleSendFile = async (file: File) => {
-    if (!connectionRef.current?.open) {
+    if (!connectionRef.current) {
       alert('Bağlantı hazır değil');
       return;
     }
