@@ -14,61 +14,62 @@ function App() {
   const [remoteName, setRemoteName] = useState('');
   const [roomId, setRoomId] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('🔴 Bağlanıyor');
-  const connectionRef = useRef<any>(null);
   const [dataConnected, setDataConnected] = useState(false);
 
-  const { 
-    messages, 
-    addMessage, 
-    loadMessages, 
-    unreadCount, 
-    markAsRead 
+  const connectionRef = useRef<any>(null);
+  const autoJoinedRef = useRef(false);
+
+  const {
+    messages,
+    addMessage,
+    loadMessages,
+    unreadCount
   } = useMessageHandling();
 
   const {
     startAudioCall,
     startVideoCall,
-    startScreenShare,
-    endCall,
-    setRemoteStream
+    startScreenShare
   } = useCallManager();
 
-  // Memoize connection open handler
   const handleConnectionOpen = useCallback((conn: any) => {
     connectionRef.current = conn;
     setDataConnected(true);
 
-    loadMessages(conn.peer);
+    const activeRoomId = roomId || conn.peer;
+    loadMessages(activeRoomId).catch(console.error);
 
     conn.on('data', (data: any) => {
       try {
-        const message = JSON.parse(data);
-        
+        const message = typeof data === 'string' ? JSON.parse(data) : data;
+
         if (message.type === 'text') {
-          addMessage({
+          const receivedMessage = {
             ...message,
-            status: 'received',
-            sender: remoteName || message.sender
-          });
-          StorageManager.saveMessage(message);
+            status: 'received' as const,
+            sender: message.sender || remoteName || 'Remote'
+          };
+
+          addMessage(receivedMessage);
+          StorageManager.saveMessage(receivedMessage).catch(console.error);
           NotificationManager.playSound('message');
-          NotificationManager.show(`${message.sender}: ${message.payload.slice(0, 50)}`);
+          NotificationManager.show(`${receivedMessage.sender}: ${String(receivedMessage.payload).slice(0, 50)}`);
           NotificationManager.updateBadge(unreadCount + 1);
-          
+
         } else if (message.type === 'file-start') {
           FileTransferManager.handleFileStart(message);
-          
+
         } else if (message.type === 'file-chunk') {
           FileTransferManager.handleFileChunk(message);
-          
+
         } else if (message.type === 'file-end') {
           const fileMsg = FileTransferManager.handleFileEnd(message);
+
           if (fileMsg) {
             fileMsg.sender = remoteName || 'Remote';
             addMessage(fileMsg);
-            StorageManager.saveMessage(fileMsg);
+            StorageManager.saveMessage(fileMsg).catch(console.error);
             NotificationManager.playSound('message');
-            NotificationManager.show(`${remoteName} sent a file`);
           }
         }
       } catch (e) {
@@ -77,77 +78,81 @@ function App() {
     });
 
     conn.on('close', () => {
-      connectionRef.current = null;
+      if (connectionRef.current === conn) {
+        connectionRef.current = null;
+      }
+
       setDataConnected(false);
+      setRemoteName('');
     });
 
-    if (conn.metadata?.userName) {
-      setRemoteName(conn.metadata.userName);
-    }
+    const name = conn.metadata?.userName || 'Remote';
+    setRemoteName(name);
 
     addMessage({
       id: Math.random().toString(36),
       type: 'system' as const,
       sender: 'System',
       time: new Date().toISOString(),
-      payload: `${conn.metadata?.userName || 'User'} bağlandı`,
+      payload: `${name} bağlandı`,
       status: 'received' as const
     });
-  }, [addMessage, loadMessages, remoteName, unreadCount]);
+  }, [addMessage, loadMessages, remoteName, roomId, unreadCount]);
 
-  const { 
-    peer, 
-    peerId, 
-    isConnected, 
-    createRoom, 
-    joinRoom 
+  const {
+    peer,
+    peerId,
+    isConnected,
+    createRoom,
+    joinRoom
   } = usePeerConnection(handleConnectionOpen);
 
-  // Initialize storage and notifications
   useEffect(() => {
-    StorageManager.init();
-    
+    StorageManager.init().catch(console.error);
+
     const handleFirstInteraction = async () => {
       await NotificationManager.requestPermission();
       document.removeEventListener('click', handleFirstInteraction);
     };
-    
+
     document.addEventListener('click', handleFirstInteraction);
-    
+
     return () => {
       document.removeEventListener('click', handleFirstInteraction);
     };
   }, []);
 
-  // Load user name from localStorage
   useEffect(() => {
     const savedUserName = localStorage.getItem('peer-chat-username');
+
     if (savedUserName) {
       setUserName(savedUserName);
     }
   }, []);
 
-  // Check for room parameter in URL
   useEffect(() => {
-    if (!peerId) return;
-    
+    if (autoJoinedRef.current) return;
+
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get('room');
+
     if (roomParam) {
+      autoJoinedRef.current = true;
+      setRoomId(roomParam);
       handleJoinRoom(roomParam);
     }
-  }, [peerId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Update connection status
   useEffect(() => {
     if (dataConnected) {
       setConnectionStatus('✅ Bağlı');
-    } else if (peerId) {
+    } else if (roomId || peerId) {
       setConnectionStatus('🟡 Hazır, bağlantı bekliyor');
     } else {
       setConnectionStatus('🔴 Bağlanıyor');
     }
-  }, [dataConnected, peerId]);
+  }, [dataConnected, peerId, roomId]);
 
   const handleSetUserName = (name: string) => {
     setUserName(name);
@@ -155,26 +160,50 @@ function App() {
   };
 
   const handleCreateRoom = () => {
-      createRoom();
+    const id = createRoom();
+
+    setRoomId(id);
+    setRemoteName('');
+    setDataConnected(false);
+
+    const url = `${window.location.origin}${window.location.pathname}?room=${id}`;
+    navigator.clipboard.writeText(url).catch(console.error);
+
+    window.history.replaceState(null, '', `?room=${id}`);
   };
 
-  const handleJoinRoom = async (roomId: string) => {
+  const handleJoinRoom = async (targetRoomId: string) => {
+    const cleanRoomId = targetRoomId.trim();
+
+    if (!cleanRoomId) return;
+
     try {
-      await joinRoom(roomId);
+      setRoomId(cleanRoomId);
+      setRemoteName('');
+      setDataConnected(false);
+
+      await joinRoom(cleanRoomId);
     } catch (e: any) {
       console.error('Join error:', e);
-      alert('Oda katılma hatası: ' + e.message);
+      alert('Oda katılma hatası: ' + (e?.message || String(e)));
     }
   };
 
   const handleCopyRoom = () => {
-    const url = window.location.href.split('?')[0] + `?room=${peerId}`;
-    navigator.clipboard.writeText(url);
+    const id = roomId || peerId;
+
+    if (!id) {
+      alert('Henüz oda yok');
+      return;
+    }
+
+    const url = `${window.location.origin}${window.location.pathname}?room=${id}`;
+    navigator.clipboard.writeText(url).catch(console.error);
     alert('Link kopyalandı!');
   };
 
   const handleSendMessage = (text: string) => {
-    if (!connectionRef.current?.open) {
+    if (!connectionRef.current || !connectionRef.current.open) {
       alert('Bağlantı hazır değil');
       return;
     }
@@ -190,31 +219,31 @@ function App() {
 
     connectionRef.current.send(JSON.stringify(message));
     addMessage(message);
-    StorageManager.saveMessage(message);
+    StorageManager.saveMessage(message).catch(console.error);
   };
 
   const handleSendFile = async (file: File) => {
-    if (!connectionRef.current?.open) {
+    if (!connectionRef.current || !connectionRef.current.open) {
       alert('Bağlantı hazır değil');
       return;
     }
 
     const validation = FileTransferManager.canSendFile(file);
+
     if (!validation.ok) {
       alert(validation.error);
       return;
     }
 
     const transfer = FileTransferManager.generateFileTransfer(file);
+
     for await (const chunk of FileTransferManager.readFileChunks(file, transfer.fileId)) {
       connectionRef.current.send(JSON.stringify(chunk));
     }
   };
 
   const handleCopyLink = () => {
-    const url = window.location.href.split('?')[0] + `?room=${peerId}`;
-    navigator.clipboard.writeText(url);
-    alert('Konuşma linki kopyalandı!');
+    handleCopyRoom();
   };
 
   return (
@@ -222,7 +251,7 @@ function App() {
       <Sidebar
         userName={userName}
         roomId={roomId}
-        peerId={peerId}
+        peerId={roomId || peerId}
         isConnected={dataConnected}
         connectionStatus={connectionStatus}
         onSetUserName={handleSetUserName}
