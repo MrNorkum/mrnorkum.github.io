@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useRef, useState, useCallback } from 'react';
 import Peer from 'peerjs';
 
 interface UsePeerConnectionReturn {
@@ -10,6 +10,8 @@ interface UsePeerConnectionReturn {
   joinRoom: (roomId: string) => Promise<any>;
 }
 
+const makeRoomId = () => Math.random().toString(36).substring(2, 8);
+
 export const usePeerConnection = (
   onConnectionOpen: (conn: any) => void
 ): UsePeerConnectionReturn => {
@@ -19,114 +21,121 @@ export const usePeerConnection = (
   const [error, setError] = useState<string | null>(null);
 
   const peerRef = useRef<Peer | null>(null);
-  const onConnectionOpenRef = useRef(onConnectionOpen);
+  const handledPeerRef = useRef<string | null>(null);
 
-  useEffect(() => {
-    onConnectionOpenRef.current = onConnectionOpen;
-  }, [onConnectionOpen]);
+  const destroyPeer = () => {
+    if (peerRef.current && !peerRef.current.destroyed) {
+      peerRef.current.destroy();
+    }
+    peerRef.current = null;
+    setPeer(null);
+    setPeerId('');
+    setIsConnected(false);
+    handledPeerRef.current = null;
+  };
 
-  useEffect(() => {
-    if (peerRef.current) return;
-
-    const config: RTCConfiguration = {
-      iceServers: [
-        { urls: ['stun:stun.l.google.com:19302'] },
-        { urls: ['stun:stun1.l.google.com:19302'] },
-        { urls: ['stun:stun2.l.google.com:19302'] },
-        { urls: ['stun:stun3.l.google.com:19302'] },
-      ],
-    };
-
-    const newPeer = new Peer({ config });
-    peerRef.current = newPeer;
-    setPeer(newPeer);
-
-    newPeer.on('open', (id: string) => {
-      console.log('✅ PeerJS bağlantısı kuruldu, ID:', id);
-      setPeerId(id);
-      setIsConnected(true);
-      setError(null);
-    });
-
-    const handledConnections = new Set<string>();
-
-    newPeer.on('connection', (conn: any) => {
+  const attachIncoming = (p: Peer) => {
+    p.on('connection', (conn: any) => {
       console.log('✅ Bağlantı isteği geldi:', conn.peer);
 
-      if (handledConnections.has(conn.peer)) {
-        console.log('⚠️ Aynı peer zaten işlendi:', conn.peer);
+      if (handledPeerRef.current === conn.peer) {
+        console.log('⚠️ Aynı peer tekrar geldi, yok sayıldı:', conn.peer);
         return;
       }
 
-      handledConnections.add(conn.peer);
-
-      // Eski index.html gibi: connection gelir gelmez kabul et
-      onConnectionOpenRef.current(conn);
+      handledPeerRef.current = conn.peer;
 
       conn.on('open', () => {
         console.log('✅ Gelen bağlantı data kanalı açıldı:', conn.peer);
+        setIsConnected(true);
+        onConnectionOpen(conn);
       });
 
       conn.on('data', (data: any) => {
-        console.log('📩 Host data aldı:', data);
+        console.log('📩 Data geldi:', data);
       });
 
       conn.on('close', () => {
-        handledConnections.delete(conn.peer);
+        console.log('🔌 Gelen bağlantı kapandı:', conn.peer);
+        setIsConnected(false);
+        handledPeerRef.current = null;
       });
 
       conn.on('error', (err: any) => {
         console.error('❌ Gelen bağlantı hatası:', err);
-        handledConnections.delete(conn.peer);
+        setError(err?.message || String(err));
+        setIsConnected(false);
+        handledPeerRef.current = null;
       });
     });
 
-    newPeer.on('error', (err: any) => {
+    p.on('error', (err: any) => {
       console.error('❌ PeerJS hatası:', err);
-      setError(err.message);
+      setError(err?.message || String(err));
     });
-
-    newPeer.on('disconnected', () => {
-      console.log('PeerJS bağlantısı koparıldı');
-      setIsConnected(false);
-    });
-
-    return () => {
-      newPeer.destroy();
-      peerRef.current = null;
-    };
-  }, []);
+  };
 
   const createRoom = useCallback(() => {
-    console.log('🎉 Oda oluşturuldu, ID:', peerId);
-  }, [peerId]);
+    destroyPeer();
+
+    const id = makeRoomId();
+    const p = new Peer(id);
+
+    peerRef.current = p;
+    setPeer(p);
+
+    p.on('open', (openedId: string) => {
+      console.log('✅ Oda oluşturuldu, ID:', openedId);
+      setPeerId(openedId);
+      setError(null);
+    });
+
+    attachIncoming(p);
+  }, [onConnectionOpen]);
 
   const joinRoom = useCallback((roomId: string) => {
     return new Promise<any>((resolve, reject) => {
-      const currentPeer = peerRef.current;
+      destroyPeer();
 
-      if (!currentPeer) {
-        reject(new Error('Peer bağlantısı hazırlanmamış'));
-        return;
-      }
+      const p = new Peer();
 
-      const conn = currentPeer.connect(roomId, {
-        reliable: true,
-        metadata: { userName: 'User' },
+      peerRef.current = p;
+      setPeer(p);
+
+      p.on('open', (id: string) => {
+        console.log('✅ PeerJS bağlantısı kuruldu, ID:', id);
+        setPeerId(id);
+        setError(null);
+
+        const conn = p.connect(roomId, { reliable: true });
+
+        conn.on('open', () => {
+          console.log('✅ Odaya bağlanıldı:', roomId);
+          setIsConnected(true);
+          onConnectionOpen(conn);
+          resolve(conn);
+        });
+
+        conn.on('close', () => {
+          console.log('🔌 Oda bağlantısı kapandı:', roomId);
+          setIsConnected(false);
+        });
+
+        conn.on('error', (err: any) => {
+          console.error('❌ Bağlantı hatası:', err);
+          setError(err?.message || String(err));
+          setIsConnected(false);
+          reject(err);
+        });
       });
 
-      conn.on('open', () => {
-        console.log('✅ Odaya bağlanıldı:', roomId);
-        onConnectionOpenRef.current(conn);
-        resolve(conn);
-      });
-
-      conn.on('error', (err: any) => {
-        console.error('❌ Bağlantı hatası:', err);
+      p.on('error', (err: any) => {
+        console.error('❌ PeerJS hatası:', err);
+        setError(err?.message || String(err));
         reject(err);
       });
     });
-  }, []);
+  }, [onConnectionOpen]);
 
   return { peer, peerId, isConnected, error, createRoom, joinRoom };
 };
