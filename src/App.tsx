@@ -15,6 +15,7 @@ function App() {
   const [roomId, setRoomId] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('🔴 Bağlanıyor');
   const connectionRef = useRef<any>(null);
+  const [dataConnected, setDataConnected] = useState(false);
 
   const { 
     messages, 
@@ -35,7 +36,8 @@ function App() {
   // Memoize connection open handler
   const handleConnectionOpen = useCallback((conn: any) => {
     connectionRef.current = conn;
-    
+    setDataConnected(true);
+
     loadMessages(conn.peer);
 
     conn.on('data', (data: any) => {
@@ -76,6 +78,7 @@ function App() {
 
     conn.on('close', () => {
       connectionRef.current = null;
+      setDataConnected(false);
     });
 
     if (conn.metadata?.userName) {
@@ -137,14 +140,14 @@ function App() {
 
   // Update connection status
   useEffect(() => {
-    if (isConnected && connectionRef.current?.open) {
+    if (dataConnected) {
       setConnectionStatus('✅ Bağlı');
     } else if (peerId) {
-      setConnectionStatus('🔄 Bağlanıyor');
+      setConnectionStatus('🟡 Hazır, bağlantı bekliyor');
     } else {
       setConnectionStatus('🔴 Bağlanıyor');
     }
-  }, [isConnected, peerId]);
+  }, [dataConnected, peerId]);
 
   const handleSetUserName = (name: string) => {
     setUserName(name);
