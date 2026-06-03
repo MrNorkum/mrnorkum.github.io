@@ -1944,7 +1944,8 @@
                 });
 
                 call.on('error', (err) => {
-                    UIManager.showToast(`❌ Çağrı hatası: ${err.message}`, 'error');
+                    console.error('❌ Çağrı hatası:', err);
+                    UIManager.showToast(`❌ Çağrı hatası: ${err.message}. TURN sunucusu denenebilir.`, 'error');
                     this.endCall();
                 });
 
@@ -1963,7 +1964,8 @@
                 });
 
                 call.on('error', (err) => {
-                    UIManager.showToast(`❌ Çağrı hatası: ${err.message}`, 'error');
+                    console.error('❌ Çağrı hatası:', err);
+                    UIManager.showToast(`❌ Çağrı hatası: ${err.message}. TURN sunucusu denenebilir.`, 'error');
                     this.endCall();
                 });
 
@@ -1982,7 +1984,8 @@
                 });
 
                 call.on('error', (err) => {
-                    UIManager.showToast(`❌ Çağrı hatası: ${err.message}`, 'error');
+                    console.error('❌ Çağrı hatası:', err);
+                    UIManager.showToast(`❌ Çağrı hatası: ${err.message}. TURN sunucusu denenebilir.`, 'error');
                     this.endCall();
                 });
 
@@ -2132,12 +2135,23 @@
         const PeerManager = {
             async init() {
                 return new Promise((resolve) => {
-                    // Use default PeerJS cloud with minimal STUN servers for fast discovery
+                    // Use default PeerJS cloud with STUN + TURN servers for NAT traversal
                     AppState.peer = new Peer({
                         config: {
                             iceServers: [
                                 { urls: ['stun:stun.l.google.com:19302'] },
-                                { urls: ['stun:stun1.l.google.com:19302'] }
+                                { urls: ['stun:stun1.l.google.com:19302'] },
+                                // Public TURN servers for relay (needed for some networks)
+                                { 
+                                    urls: ['turn:openrelay.metered.ca:80'],
+                                    username: 'openrelayproject',
+                                    credential: 'openrelayproject'
+                                },
+                                { 
+                                    urls: ['turn:openrelay.metered.ca:443?transport=tcp'],
+                                    username: 'openrelayproject',
+                                    credential: 'openrelayproject'
+                                }
                             ]
                         }
                     });
@@ -2202,12 +2216,18 @@
                 });
 
                 conn.on('error', (err) => {
-                    console.error('❌ Bağlantı hatası:', err);
-                    UIManager.showToast(`❌ ${roomId} odasına bağlanılamadı: ${err.message}`, 'error');
+                    console.error('❌ DataChannel hatası:', err);
+                    UIManager.showToast(`❌ Bağlantı hatası: ${err.message}. Lütfen Peer ID'yi kontrol edin.`, 'error');
                     UIManager.updateConnectionStatus('disconnected');
                 });
 
-                UIManager.showToast(`⏳ ${roomId} odasına bağlanılıyor...`, 'info');
+                conn.on('close', () => {
+                    console.log('Bağlantı kapatıldı');
+                    AppState.isConnected = false;
+                    UIManager.updateConnectionStatus('disconnected');
+                });
+
+                UIManager.showToast(`⏳ ${roomId.substring(0, 8)}... odasına bağlanılıyor...`, 'info');
             },
 
             handleConnection(conn) {
