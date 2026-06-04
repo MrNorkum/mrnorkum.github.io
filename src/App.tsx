@@ -1,4 +1,4 @@
-import { ChangeEvent, KeyboardEvent, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import Peer, { DataConnection } from 'peerjs';
 import './App.css';
 
@@ -189,13 +189,20 @@ function ChatHeader({ activeRoom, connected }: { activeRoom: string; connected: 
 }
 
 function MessageList({ messages }: { messages: ChatMessage[] }) {
-  const endRef = useRef<HTMLDivElement | null>(null);
+  const messagesRef = useRef<HTMLElement | null>(null);
 
-  setTimeout(() => endRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+  }, [messages]);
 
   if (messages.length === 0) {
     return (
-      <main className="messages">
+      <main className="messages" ref={messagesRef}>
         <div className="empty-state">
           <div className="empty-icon">💬</div>
           <h3>Henüz mesaj yok</h3>
@@ -206,11 +213,10 @@ function MessageList({ messages }: { messages: ChatMessage[] }) {
   }
 
   return (
-    <main className="messages">
+    <main className="messages" ref={messagesRef}>
       {messages.map((message) => (
         <MessageBubble key={message.id} message={message} />
       ))}
-      <div ref={endRef} />
     </main>
   );
 }
